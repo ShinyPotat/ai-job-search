@@ -110,8 +110,37 @@ All errors are written to **stderr** as `{ "error": "...", "code": "..." }` and 
 - Location can be provided via `--query` (e.g. `"enfermera sevilla"`) or via `--location`.
 - Job IDs use the `jk` hex hash format (e.g. `abc123def456`).
 - **Defuddle** is used for HTML content extraction; install it globally (`npm install -g defuddle`) for best results.
-- Rate limiting is handled with **6 retries** and exponential backoff (500 ms initial, up to 8 s).
+- Rate limiting is handled with **6 retries** and exponential backoff (500 ms initial, up to 8 s) for transient errors. Permanent errors (403, 404) fail immediately.
 - Searches are limited to `es.indeed.com` only.
 - **Sponsored results are filtered out**; only organic `rc/clk` URLs are kept.
 - Indeed may block automated requests; keep volume low (see the ToS note above).
 - **Known limitation:** `--jobage` and `--limit` are client-side filters applied after search results are fetched. The total result count shown by Indeed may therefore be higher than the number of results emitted.
+
+## 🔑 BrightData Web Unlocker (recommended)
+
+Indeed España aggressively blocks automated scraping (403 Forbidden). The CLI supports **BrightData Web Unlocker** to bypass anti-bot protection.
+
+### Setup
+
+1. Create a free BrightData account at https://brightdata.com
+2. Create a **Web Unlocker** zone in your dashboard
+3. Set environment variables:
+
+```bash
+export BRIGHTDATA_API_KEY="your-api-key"
+export BRIGHTDATA_ZONE="your-zone-name"
+```
+
+The free tier includes **5,000 requests/month** — more than enough for personal use. No charges unless you exceed the free quota.
+
+### How it works
+
+When BrightData is configured, the CLI routes all requests through BrightData's proxy network instead of scraping directly. BrightData handles CAPTCHAs, IP rotation, and browser fingerprinting automatically. Requests take 30–60 seconds as BrightData solves anti-bot challenges.
+
+When BrightData is **not** configured, the CLI falls back to direct scraping, which fails immediately with a clear error if Indeed blocks the request.
+
+### Limitations with BrightData
+
+- **Date/salary/contract fields** may be empty in search results — BrightData's HTML renders them differently than direct scraping. Use the `detail` command on individual job URLs for full information.
+- **30–60 second latency** per search (CAPTCHA solving + IP rotation).
+- Requires a payment method on file (free tier is not charged).

@@ -1,7 +1,11 @@
-// Indeed Spain scraper — uses `defuddle parse --md` for clean text plus raw
-// HTML for reliable jk-hash extraction. No API key required. Personal use only.
+// Indeed Spain scraper — uses BrightData Web Unlocker to bypass anti-bot
+// protection, then `defuddle parse --md` for clean text. Falls back to direct
+// scraping when BrightData is not configured. Personal use only.
 
 import { $ } from "bun"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { unlink } from "node:fs/promises"
 
 export const SEARCH_URL = "https://es.indeed.com/jobs"
 export const DETAIL_URL = "https://es.indeed.com/viewjob"
@@ -55,6 +59,28 @@ export class RetryableError extends Error {
   }
 }
 
+/**
+ * Parse defuddle's stderr for an HTTP status code.
+ * defuddle writes errors like "Error: Failed to fetch: 403\n" to stderr.
+ * Returns the status number, or null if no HTTP status was found.
+ */
+function extractDefuddleHttpStatus(stderr: string): number | null {
+  const match = stderr.match(/Failed to fetch:\s*(\d{3})/i)
+  return match ? parseInt(match[1], 10) : null
+}
+
+/**
+ * Decide whether an HTTP status should trigger a retry.
+ * Retry: 429 (rate-limit), 5xx (server errors), and network-level failures.
+ * Do NOT retry: 403 (forbidden), 404 (not found), and other 4xx.
+ */
+function isRetryableStatus(status: number | null): boolean {
+  if (status === null) return true   // network error, no status → retry
+  if (status === 429) return true    // rate-limit
+  if (status >= 500) return true     // server errors
+  return false                       // 4xx (except 429) → permanent, don't retry
+}
+
 export interface RetryConfig {
   maxRetries?: number
   initialDelay?: number
@@ -86,6 +112,78 @@ export async function withRetry<T>(
   throw new Error(`${label} failed after ${maxRetries} retries`)
 }
 
+// ── BrightData Web Unlocker ────────────────────────────────────────────
+// When configured, routes all Indeed requests through BrightData to bypass
+// anti-bot protection (403 blocks). Falls back to direct scraping otherwise.
+
+interface BrightDataConfig {
+  apiKey: string
+  zone: string
+}
+
+function getBrightDataConfig(): BrightDataConfig | null {
+  const apiKey = process.env.BRIGHTDATA_API_KEY
+  const zone = process.env.BRIGHTDATA_ZONE
+  if (apiKey && zone) return { apiKey, zone }
+  return null
+}
+
+/**
+ * Fetch a URL through BrightData's Web Unlocker REST API.
+ * Can take 30-60s as BrightData solves CAPTCHAs and rotates IPs.
+ */
+async function brightdataFetch(url: string): Promise<string> {
+  const config = getBrightDataConfig()
+  if (!config) throw new Error("BrightData not configured")
+
+  const response = await fetch("https://api.brightdata.com/request", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${config.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ zone: config.zone, url, format: "raw" }),
+    signal: AbortSignal.timeout(90_000),
+  })
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "")
+    const status = response.status
+    if (status === 429 || status >= 500) {
+      throw new RetryableError(`BrightData request failed: HTTP ${status}`, status)
+    }
+    throw new Error(
+      `BrightData request failed: HTTP ${status}${body ? ` — ${body.slice(0, 200)}` : ""}`,
+    )
+  }
+
+  return await response.text()
+}
+
+/**
+ * Run defuddle on a local HTML file to produce markdown.
+ * defuddle can't read from stdin, so we write to a temp file.
+ */
+async function defuddleLocal(html: string): Promise<string> {
+  const defuddlePath = await findDefuddle()
+  const tmpPath = join(tmpdir(), `indeed_bd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.html`)
+
+  try {
+    await Bun.write(tmpPath, html)
+    const result = await $`${defuddlePath} parse ${tmpPath} --md`.quiet().nothrow()
+    if (result.exitCode !== 0) {
+      const stderr = result.stderr.toString()
+      throw new Error(`defuddle failed to parse HTML: ${stderr.slice(0, 200)}`)
+    }
+    return result.stdout.toString()
+  } finally {
+    // Clean up temp file — ignore errors
+    unlink(tmpPath).catch(() => {})
+  }
+}
+
+// ── Defuddle executable ────────────────────────────────────────────────
+
 /** Locate the defuddle executable, or throw if missing. */
 async function findDefuddle(): Promise<string> {
   const which = await $`which defuddle`.quiet().nothrow()
@@ -96,8 +194,18 @@ async function findDefuddle(): Promise<string> {
   return path
 }
 
-/** Fetch both raw HTML and Defuddle markdown in parallel. */
+/** Fetch both raw HTML and Defuddle markdown. Routes through BrightData when configured. */
 export async function fetchSearchPage(url: string): Promise<{ markdown: string; html: string }> {
+  const bd = getBrightDataConfig()
+
+  // ── BrightData path: bypass anti-bot, parse HTML locally ───────────
+  if (bd) {
+    const html = await brightdataFetch(url)
+    const markdown = await defuddleLocal(html)
+    return { markdown, html }
+  }
+
+  // ── Direct path (fallback) ─────────────────────────────────────────
   return withRetry(async () => {
     const defuddlePath = await findDefuddle()
 
@@ -114,6 +222,15 @@ export async function fetchSearchPage(url: string): Promise<{ markdown: string; 
     ])
 
     if (mdResult.exitCode !== 0) {
+      const stderr = mdResult.stderr.toString()
+      const status = extractDefuddleHttpStatus(stderr)
+      if (!isRetryableStatus(status)) {
+        throw new Error(
+          status
+            ? `defuddle fetch returned HTTP ${status} — this is a permanent error, not retrying`
+            : `defuddle failed with permanent error: ${stderr.slice(0, 200)}`,
+        )
+      }
       throw new RetryableError("defuddle failed to fetch the URL")
     }
 
@@ -132,12 +249,30 @@ export async function fetchSearchPage(url: string): Promise<{ markdown: string; 
   }, "fetchSearchPage")
 }
 
-/** Fetch a single detail page via defuddle. */
+/** Fetch a single detail page. Routes through BrightData when configured. */
 export async function defuddleFetch(url: string): Promise<string> {
+  const bd = getBrightDataConfig()
+
+  // ── BrightData path ────────────────────────────────────────────────
+  if (bd) {
+    const html = await brightdataFetch(url)
+    return await defuddleLocal(html)
+  }
+
+  // ── Direct path (fallback) ─────────────────────────────────────────
   return withRetry(async () => {
     const defuddlePath = await findDefuddle()
     const result = await $`${defuddlePath} parse ${url} --md`.quiet().nothrow()
     if (result.exitCode !== 0) {
+      const stderr = result.stderr.toString()
+      const status = extractDefuddleHttpStatus(stderr)
+      if (!isRetryableStatus(status)) {
+        throw new Error(
+          status
+            ? `defuddle fetch returned HTTP ${status} — this is a permanent error, not retrying`
+            : `defuddle failed with permanent error: ${stderr.slice(0, 200)}`,
+        )
+      }
       throw new RetryableError("defuddle failed to fetch the URL")
     }
     return result.stdout.toString()
@@ -293,6 +428,129 @@ export function parseCardEntry(chunk: string): JobCard | null {
   }
 }
 
+/**
+ * Normalize BrightData-defuddle markdown to the old direct-scraping format.
+ *
+ * BrightData produces:
+ *   - ### Title
+ *       Company Name
+ *       Location
+ *       - detail lines...
+ *
+ * We convert to:
+ *   ## Title
+ *   ### Company Name
+ *   - Location
+ *   - detail lines...
+ *
+ * If no BrightData-format cards are detected, the input is returned unchanged.
+ */
+function normalizeBrightDataMarkdown(md: string): string {
+  // Detect BrightData format: cards start with "- ### " (bullet + heading)
+  if (!/^- ### /m.test(md)) return md
+
+  const lines = md.split("\n")
+  const out: string[] = []
+  let i = 0
+
+  while (i < lines.length) {
+    const line = lines[i]
+    const trimmed = line.trim()
+
+    // BrightData job card: "- ### Title"
+    if (trimmed.startsWith("- ### ")) {
+      const title = trimmed.slice(6).trim() // after "- ### "
+      out.push(`## ${title}`)
+
+      // Collect metadata lines until next "- ###" or end of list section
+      i++
+      const metaLines: string[] = []
+      const detailLines: string[] = []
+      let inDetails = false
+
+      while (i < lines.length) {
+        const next = lines[i]
+        const nt = next.trim()
+
+        // Stop at next job card or section header
+        if (nt.startsWith("- ### ") || nt.startsWith("## ") || nt === "") {
+          break
+        }
+
+        if (nt.startsWith("- ")) {
+          inDetails = true
+          detailLines.push(nt)
+        } else if (!inDetails) {
+          // Metadata: company, location, tags
+          // Skip UI tags like "Solicitud rápida", "Nueva"
+          if (!/^(Solicitud\s+rápida|Solicitud\s+directa|Nueva|Destacada)$/i.test(nt)) {
+            metaLines.push(nt)
+          }
+        }
+        i++
+      }
+
+      // First meta line is typically the company, second is location
+      if (metaLines.length > 0) {
+        const company = metaLines[0]
+        out.push(`### ${company}`)
+      }
+
+      // Remaining meta lines and details
+      for (let m = 1; m < metaLines.length; m++) {
+        let val = metaLines[m]
+        // Strip work-mode prefix from location lines:
+        // "Teletrabajo in Madrid, Madrid provincia" → "Madrid, Madrid provincia"
+        const workModeMatch = val.match(
+          /^(?:Teletrabajo|Trabajo\s+h[ií]brido|Presencial|Solo\s+teletrabajo|Remoto)\s+in\s+/i,
+        )
+        if (workModeMatch) {
+          val = val.slice(workModeMatch[0].length)
+        }
+        if (val.startsWith("- ")) {
+          out.push(val)
+        } else {
+          out.push(`- ${val}`)
+        }
+      }
+
+      for (const d of detailLines) {
+        out.push(d)
+      }
+
+      out.push("") // blank line between cards
+      continue
+    }
+
+    // Pass through non-card lines (skip BrightData page chrome)
+    // Skip page header like "## Empleos de python en..."
+    if (trimmed.startsWith("## ") && /\bempleos?\s+de\b/i.test(trimmed)) {
+      i++
+      while (i < lines.length && lines[i].trim() !== "") i++
+      continue
+    }
+
+    // Skip BrightData section markers
+    if (trimmed === "## Job Post Details") {
+      i++
+      while (i < lines.length && lines[i].trim() !== "") i++
+      continue
+    }
+
+    // Skip nav/link lines
+    if (trimmed.startsWith("Clasificar por:") || trimmed.startsWith("Quiero recibir") || trimmed.startsWith("Al crear una alerta")) {
+      i++
+      while (i < lines.length && lines[i].trim() !== "") i++
+      continue
+    }
+
+    out.push(line)
+    i++
+  }
+
+  return out.join("\n")
+}
+
 /** Split markdown into job-card chunks. */
 function splitCardChunks(markdown: string): string[] {
   const positions: number[] = []
@@ -321,6 +579,9 @@ function splitCardChunks(markdown: string): string[] {
 
 /** Parse Indeed search results from markdown and correlate organic jk hashes from HTML. */
 export function parseSearchResults(markdown: string, html?: string): JobCard[] {
+  // Normalize BrightData markdown format if detected
+  markdown = normalizeBrightDataMarkdown(markdown)
+
   const jkHashes = html ? extractJkHashes(html) : []
   const chunks = splitCardChunks(markdown)
   const cards: JobCard[] = []
