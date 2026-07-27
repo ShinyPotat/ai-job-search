@@ -33,9 +33,9 @@ Chain strategy: pending
 
 ## Phase 2: CLI & Commands
 
-- [ ] 2.1 Create `cli.ts` — flag parsing, subcommand dispatch, error codes (NO_QUERY, NO_ID, BAD_ARG, BAD_CMD)
-- [ ] 2.2 Create `commands/search.ts` — buildUrl, runSearch, emit with format and filters
-- [ ] 2.3 Create `commands/detail.ts` — normalizeId, defuddleFetch, parse, emit detail or NOT_FOUND
+- [x] 2.1 Create `cli.ts` — flag parsing, subcommand dispatch, error codes (NO_QUERY, NO_ID, BAD_ARG, BAD_CMD)
+- [x] 2.2 Create `commands/search.ts` — buildUrl, runSearch, emit with format and filters
+- [x] 2.3 Create `commands/detail.ts` — normalizeId, defuddleFetch, parse, emit detail or NOT_FOUND
 
 ## Phase 3: Tests
 
@@ -46,6 +46,6 @@ Chain strategy: pending
 
 ## Phase 4: Config & Docs
 
-- [ ] 4.1 Create `package.json` — bun project config with test/typecheck scripts
-- [ ] 4.2 Create `tsconfig.json` — strict TypeScript, bundler resolution
-- [ ] 4.3 Create `SKILL.md` — frontmatter, usage docs, trigger phrases, allowed-tools
+- [x] 4.1 Create `package.json` — bun project config with test/typecheck scripts
+- [x] 4.2 Create `tsconfig.json` — strict TypeScript, bundler resolution
+- [x] 4.3 Create `SKILL.md` — frontmatter, usage docs, trigger phrases, allowed-tools
