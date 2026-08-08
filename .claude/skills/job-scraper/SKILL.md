@@ -93,7 +93,16 @@ command (see its SKILL.md — do not guess flags) to extract **key requirements*
 **application deadline**, and a brief description snippet.
 
 **From WebSearch results:** Use `WebFetch` on the posting URL and extract the same
-fields manually.
+fields manually. If it returns HTTP 403, retry with browser headers via curl per
+`.claude/skills/job-application-assistant/09-web-research.md` before giving up — most
+bank and corporate sites reject WebFetch's user agent while serving browsers normally.
+
+**Store a URL that actually resolves to the posting.** A listing-page URL with a
+`#fragment` appended (`.../jobs/ciso/#ikerian`) is not a posting: it fetches fine and
+returns unrelated job titles, which makes every later `/rank` and `/apply` run fail on
+that entry. When WebSearch only yields a listing page, search the employer's own careers
+site for the role and store that URL instead, or drop the candidate rather than saving a
+fragment link.
 
 For every candidate:
 - Skip if the URL or company+title combo already exists in `seen_jobs.json`
@@ -112,6 +121,8 @@ For each new job, do a rapid fit check (NOT the full evaluation from `04-job-eva
 - **High match**: Role directly involves your core skills
 - **Medium match**: Role is adjacent to your experience
 - **Low match**: Role requires significant skills you lack
+
+**Language override:** before assigning a match level, check the posting against `04-job-evaluation.md`'s Language Gate (a required language you haven't declared at all in your CLAUDE.md Languages table). A required language that's entirely undeclared overrides skill fit: mark it **Low** regardless of how well the skills align, and name it in the highlight bullets so it isn't buried under an otherwise-good-looking match. A **declared** language at a requirement that reads higher than your declared level is *not* an override — score fit normally, but add a red-flag bullet under that job's highlights (Step 5) quoting the posting's requirement next to your declared level, so the gap is visible without being auto-downgraded.
 
 ### Step 4: Deduplicate & Store
 
@@ -134,7 +145,7 @@ For each new job, do a rapid fit check (NOT the full evaluation from `04-job-eva
 
 The `portal` field records which CLI skill produced the job (results are already tagged per portal in Step 1b - persist that tag here). Entries written before this field existed lack it; the health check (Step 4.75) attributes those by matching the URL's domain against each portal's base URL, so do not backfill.
 
-`/rank` extends this schema additively: ranked entries also carry `rank_score` (0–100 overall score), `rank_verdict` (fit band, e.g. "strong fit"), and `rank_date` (ISO date of ranking). The `status` field is set to `"ranked"`. Do not drop any of these fields when re-writing entries.
+`/rank` extends this schema additively: ranked entries also carry `rank_score` (0–100 overall score), `rank_verdict` (fit band, e.g. "strong fit"), `rank_date` (ISO date of ranking), and `strengths`/`gaps` (1-3 verbatim bullets each, copied from the scoring agent's findings). The `status` field is set to `"ranked"`. Do not drop any of these fields when re-writing entries. Entries ranked before `strengths`/`gaps` existed simply lack them; readers tolerate their absence and never backfill by guessing.
 
 2. Only present jobs NOT already in the seen list or tracker.
 
@@ -203,7 +214,7 @@ health: <portal-name> - broken (0 results for the SKILL.md test query and a broa
 |---|-----|-------|---------|----------|----------|-----|
 | 1 | High | ... | ... | ... | ... | [Link](...) |
 
-If Step 2.5 flagged a mass-posting pattern, note it in the Title cell (e.g. "Frontend Developer (posted in 6 cities)") rather than burying it - it's a signal the user should see at a glance, not just in the detail highlights below.
+If Step 2.5 flagged a mass-posting pattern, note it in the Title cell (e.g. "Frontend Developer (posted in 6 cities)") rather than burying it. Do the same for a declared-language-insufficient-level flag from the Language Gate (e.g. "Backend Engineer ⚠ fluent English required") - both are signals the user should see at a glance, not just in the detail highlights below.
 
 ### High-Match Highlights
 For each high-match job, add 2-3 bullet points:
@@ -227,7 +238,7 @@ If the run found many new jobs (roughly 8+), also suggest `/rank` - it batch-sco
 
 ### Step 6: Update Tracker (Optional)
 
-If the user decides to apply to any job, add a row to `job_search_tracker.csv`.
+If the user decides to apply to any job, the tracker row is written by **job-application-assistant Step 3b**, which Step 5 already routes into - do not add a second row here. Only when the user says they applied to something outside that path, add a row using the header and the match-then-update rule in `/outcome` Step 1.
 
 ---
 

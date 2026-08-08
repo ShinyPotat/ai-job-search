@@ -48,16 +48,33 @@ REQUIRED_IGNORE_RULES = [
     # to its own directory, so the state file lands under .claude/skills/... and
     # a repo-rooted rule silently fails to match it.
     "**/job_scraper/seen_jobs.json",
-    "cv/main_*.tex",
+    "**/job_scraper/notion_sync.json",
+    "**/job_scraper/*.md",
+    "*_BehavioralReport.pdf",
+    "linkedin_Profile.pdf",
+    "cv/main_*.*",
     "!cv/main_example.tex",
-    "cover_letters/cover_*.tex",
+    # ATS text extractions (/apply step 5d) carry the CV's full text.
+    "cv/*.txt",
+    "cover_letters/cover_*.*",
+    # /apply also recognizes the uppercase Cover_* naming variant.
+    "cover_letters/Cover_*.*",
     "documents/cv/**",
     "documents/linkedin/**",
     "documents/diplomas/**",
     "documents/references/**",
     "documents/applications/**",
+    "documents/postings/**",
     "documents/interview/**",
     "job_search_tracker.csv",
+    "gmail_sync/",
+    "reports/",
+    "upskill/*.md",
+    # Not personal data but the same failure mode: /add-portal can generate a
+    # skill for a portal that only returns usable content through a paid
+    # fetching service, and that skill reads an API token from the environment.
+    ".env",
+    ".env.*",
 ]
 
 # Negation (re-include) rules the template legitimately ships. .gitignore is
